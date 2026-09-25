@@ -20,6 +20,7 @@ jobs:
     env:
       GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g"
       ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
     steps:
       - name: Checkout (with LFS, shallow)
@@ -50,23 +51,13 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Print sdkmanager location & pre-installed packages
+      - name: Verify Android SDK (pre-installed on runner)
         run: |
-          which sdkmanager || true
-          ls -la $ANDROID_HOME/cmdline-tools/ 2>/dev/null || true
-          ls $ANDROID_HOME/platforms/ 2>/dev/null || true
-          ls $ANDROID_HOME/build-tools/ 2>/dev/null || true
-          echo "--- sdkmanager version ---"
-          sdkmanager --version 2>&1 || true
-
-      - name: Install Android SDK components (android-35 + build-tools 35.0.0)
-        run: |
-          set -e
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          yes | sdkmanager "platforms;android-35" "build-tools;35.0.0" "platforms;android-33"
-          echo "--- verify ---"
-          ls $ANDROID_HOME/platforms/
-          ls $ANDROID_HOME/build-tools/
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME/platforms/" | head -20 || true
+          ls "$ANDROID_HOME/build-tools/" | head -20 || true
+          test -d "$ANDROID_HOME/platforms/android-35" && echo "android-35 ✓"
+          test -d "$ANDROID_HOME/build-tools/35.0.0" && echo "build-tools 35.0.0 ✓"
 
       - name: Make gradlew executable
         run: chmod +x ./gradlew
