@@ -60,19 +60,19 @@ fun SettingsView(navController: NavController, appViewModel: AppViewModel) {
     val settings = appViewModel.chatSettings
 
     // local mutable copies so sliders update instantly
-    var temperature by remember { mutableStateOf(settings.temperature.value.value) }
-    var topP by remember { mutableStateOf(settings.topP.value.value) }
-    var maxGenLen by remember { mutableStateOf(settings.maxGenLen.value.value.toFloat()) }
-    var meanGenLen by remember { mutableStateOf(settings.meanGenLen.value.value.toFloat()) }
-    var repPen by remember { mutableStateOf(settings.repetitionPenalty.value.value) }
-    var presPen by remember { mutableStateOf(settings.presencePenalty.value.value) }
-    var freqPen by remember { mutableStateOf(settings.frequencyPenalty.value.value) }
-    var shiftK by remember { mutableStateOf(settings.shiftK.value.value.toFloat()) }
-    var prefillChunk by remember { mutableStateOf(settings.prefillChunkSize.value.value.toFloat()) }
-    var streaming by remember { mutableStateOf(settings.streaming.value.value) }
-    var threads by remember { mutableStateOf(settings.threads.value.value.toFloat()) }
-    var systemPrompt by remember { mutableStateOf(settings.systemPrompt.value.value) }
-    var convTemplate by remember { mutableStateOf(settings.convTemplate.value.value) }
+    var temperature by remember { mutableStateOf(settings.temperature.value) }
+    var topP by remember { mutableStateOf(settings.topP.value) }
+    var maxGenLen by remember { mutableStateOf(settings.maxGenLen.value.toFloat()) }
+    var meanGenLen by remember { mutableStateOf(settings.meanGenLen.value.toFloat()) }
+    var repPen by remember { mutableStateOf(settings.repetitionPenalty.value) }
+    var presPen by remember { mutableStateOf(settings.presencePenalty.value) }
+    var freqPen by remember { mutableStateOf(settings.frequencyPenalty.value) }
+    var shiftK by remember { mutableStateOf(settings.shiftK.value.toFloat()) }
+    var prefillChunk by remember { mutableStateOf(settings.prefillChunkSize.value.toFloat()) }
+    var streaming by remember { mutableStateOf(settings.streaming.value) }
+    var threads by remember { mutableStateOf(settings.threads.value.toFloat()) }
+    var systemPrompt by remember { mutableStateOf(settings.systemPrompt.value) }
+    var convTemplate by remember { mutableStateOf(settings.convTemplate.value) }
 
     Scaffold(
         topBar = {
@@ -102,19 +102,19 @@ fun SettingsView(navController: NavController, appViewModel: AppViewModel) {
                         val app = appViewModel.getApplication<android.app.Application>()
                         settings.save(app, app.getExternalFilesDir(""))
                         // refresh local
-                        temperature = settings.temperature.value.value
-                        topP = settings.topP.value.value
-                        maxGenLen = settings.maxGenLen.value.value.toFloat()
-                        meanGenLen = settings.meanGenLen.value.value.toFloat()
-                        repPen = settings.repetitionPenalty.value.value
-                        presPen = settings.presencePenalty.value.value
-                        freqPen = settings.frequencyPenalty.value.value
-                        shiftK = settings.shiftK.value.value.toFloat()
-                        prefillChunk = settings.prefillChunkSize.value.value.toFloat()
-                        streaming = settings.streaming.value.value
-                        threads = settings.threads.value.value.toFloat()
-                        systemPrompt = settings.systemPrompt.value.value
-                        convTemplate = settings.convTemplate.value.value
+                        temperature = settings.temperature.value
+                        topP = settings.topP.value
+                        maxGenLen = settings.maxGenLen.value.toFloat()
+                        meanGenLen = settings.meanGenLen.value.toFloat()
+                        repPen = settings.repetitionPenalty.value
+                        presPen = settings.presencePenalty.value
+                        freqPen = settings.frequencyPenalty.value
+                        shiftK = settings.shiftK.value.toFloat()
+                        prefillChunk = settings.prefillChunkSize.value.toFloat()
+                        streaming = settings.streaming.value
+                        threads = settings.threads.value.toFloat()
+                        systemPrompt = settings.systemPrompt.value
+                        convTemplate = settings.convTemplate.value
                     }) {
                         Text("Reset", color = MaterialTheme.colorScheme.onPrimary)
                     }

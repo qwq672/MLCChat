@@ -1232,22 +1232,29 @@ data class ChatSettings(
         "system='${systemPrompt.value.take(40)}...'"
 }
 
-// Mutable holders for Compose-friendly state
+// Mutable holders for Compose-friendly state.
+// `value` is a delegated property backed by mutableStateOf so that
+// reading `holder.value` returns the primitive directly (Float/Int/etc.)
+// while still triggering Compose recomposition on writes.
 class MutableFloatStateHolder(initial: Float, val min: Float, val max: Float) {
-    val value = mutableStateOf(initial.coerceIn(min, max))
-    fun set(v: Float) { value.value = v.coerceIn(min, max) }
+    var value: Float by mutableStateOf(initial.coerceIn(min, max))
+        private set
+    fun set(v: Float) { value = v.coerceIn(min, max) }
 }
 class MutableIntStateHolder(initial: Int, val min: Int, val max: Int) {
-    val value = mutableStateOf(initial.coerceIn(min, max))
-    fun set(v: Int) { value.value = v.coerceIn(min, max) }
+    var value: Int by mutableStateOf(initial.coerceIn(min, max))
+        private set
+    fun set(v: Int) { value = v.coerceIn(min, max) }
 }
 class MutableBooleanStateHolder(initial: Boolean) {
-    val value = mutableStateOf(initial)
-    fun set(v: Boolean) { value.value = v }
+    var value: Boolean by mutableStateOf(initial)
+        private set
+    fun set(v: Boolean) { value = v }
 }
 class MutableStringStateHolder(initial: String) {
-    val value = mutableStateOf(initial)
-    fun set(v: String) { value.value = v }
+    var value: String by mutableStateOf(initial)
+        private set
+    fun set(v: String) { value = v }
 }
 
 // ============================================================
