@@ -1,0 +1,101 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type'
+        type: choice
+        default: debug
+        options:
+          - debug
+          - release
+
+jobs:
+  build:
+    name: Build ${{ inputs.build_type }} APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout (with LFS, shallow)
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          fetch-depth: 1
+
+      - name: Show repo size & key files
+        run: |
+          echo "=== top-level ==="
+          ls -lh
+          echo "=== app ==="
+          ls -lh app/ 2>/dev/null || true
+          echo "=== .gitattributes ==="
+          cat .gitattributes 2>/dev/null || true
+          echo "=== local.properties ==="
+          cat local.properties 2>/dev/null || true
+
+      - name: Remove Windows-path local.properties (CI incompatible)
+        run: |
+          rm -f local.properties
+          echo "removed local.properties"
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platforms;android-35
+            build-tools;35.0.0
+            platforms;android-33
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.5'
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Build Debug APK
+        if: inputs.build_type == 'debug'
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace --no-build-cache
+
+      - name: Build Release APK
+        if: inputs.build_type == 'release'
+        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace --no-build-cache
+
+      - name: Locate APK
+        id: locate
+        run: |
+          set -e
+          echo "=== APK file list ==="
+          find app/build/outputs/apk -type f -name "*.apk" -print || true
+          APK=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1)
+          if [ -z "$APK" ]; then
+            echo "ERROR: no APK found under app/build/outputs/apk"
+            exit 1
+          fi
+          echo "apk_path=$APK" >> $GITHUB_OUTPUT
+          echo "apk_name=$(basename $APK)" >> $GITHUB_OUTPUT
+          ls -lh "$APK"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlcchat-${{ inputs.build_type }}-apk
+          path: app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Print artifact summary
+        run: |
+          echo "Build succeeded. Build type: ${{ inputs.build_type }}"
+          echo "APK path: ${{ steps.locate.outputs.apk_path }}"
+          echo "APK name: ${{ steps.locate.outputs.apk_name }}"
