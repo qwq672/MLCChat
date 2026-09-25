@@ -17,6 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
+    env:
+      GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g"
+      ANDROID_HOME: /usr/local/lib/android/sdk
+
     steps:
       - name: Checkout (with LFS, shallow)
         uses: actions/checkout@v4
@@ -46,29 +50,37 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: |
-            platforms;android-35
-            build-tools;35.0.0
-            platforms;android-33
+      - name: Print sdkmanager location & pre-installed packages
+        run: |
+          which sdkmanager || true
+          ls -la $ANDROID_HOME/cmdline-tools/ 2>/dev/null || true
+          ls $ANDROID_HOME/platforms/ 2>/dev/null || true
+          ls $ANDROID_HOME/build-tools/ 2>/dev/null || true
+          echo "--- sdkmanager version ---"
+          sdkmanager --version 2>&1 || true
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: '8.5'
+      - name: Install Android SDK components (android-35 + build-tools 35.0.0)
+        run: |
+          set -e
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          yes | sdkmanager "platforms;android-35" "build-tools;35.0.0" "platforms;android-33"
+          echo "--- verify ---"
+          ls $ANDROID_HOME/platforms/
+          ls $ANDROID_HOME/build-tools/
 
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
+      - name: Show gradle wrapper version
+        run: ./gradlew --version
+
       - name: Build Debug APK
         if: inputs.build_type == 'debug'
-        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace --no-build-cache
+        run: ./gradlew :app:assembleDebug --stacktrace --no-build-cache
 
       - name: Build Release APK
         if: inputs.build_type == 'release'
-        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace --no-build-cache
+        run: ./gradlew :app:assembleRelease --stacktrace --no-build-cache
 
       - name: Locate APK
         id: locate
