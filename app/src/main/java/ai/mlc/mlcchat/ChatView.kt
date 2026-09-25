@@ -23,6 +23,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Timeline
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Divider
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -48,6 +50,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import dev.jeziellago.compose.markdowntext.MarkdownText
 import kotlinx.coroutines.launch
@@ -81,6 +84,26 @@ fun ChatView(
             },
             actions = {
                 IconButton(
+                    onClick = { navController.navigate("benchmark") },
+                    enabled = chatState.interruptable()
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Timeline,
+                        contentDescription = "benchmark",
+                        tint = MaterialTheme.colorScheme.onPrimary
+                    )
+                }
+                IconButton(
+                    onClick = { navController.navigate("settings") },
+                    enabled = chatState.interruptable()
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Settings,
+                        contentDescription = "settings",
+                        tint = MaterialTheme.colorScheme.onPrimary
+                    )
+                }
+                IconButton(
                     onClick = { chatState.requestResetChat() },
                     enabled = chatState.interruptable()
                 ) {
@@ -104,14 +127,17 @@ fun ChatView(
         ) {
             val lazyColumnListState = rememberLazyListState()
             val coroutineScope = rememberCoroutineScope()
-            Text(
-                text = chatState.report.value,
-                textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .wrapContentHeight()
-                    .padding(top = 5.dp)
-            )
+            SelectionContainer {
+                Text(
+                    text = chatState.report.value,
+                    textAlign = TextAlign.Center,
+                    fontSize = 11.sp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .wrapContentHeight()
+                        .padding(top = 5.dp)
+                )
+            }
             Divider(thickness = 1.dp, modifier = Modifier.padding(vertical = 5.dp))
             LazyColumn(
                 modifier = Modifier.weight(9f),

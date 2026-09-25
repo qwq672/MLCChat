@@ -14,5 +14,7 @@ fun NavView(appViewModel: AppViewModel = viewModel()) {
     NavHost(navController = navController, startDestination = "home") {
         composable("home") { StartView(navController, appViewModel) }
         composable("chat") { ChatView(navController, appViewModel.chatState) }
+        composable("settings") { SettingsView(navController, appViewModel) }
+        composable("benchmark") { BenchmarkView(navController, appViewModel) }
     }
 }

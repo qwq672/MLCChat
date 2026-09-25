@@ -6,7 +6,9 @@ import android.app.Application
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.net.Uri
 import android.os.Environment
+import android.provider.DocumentsContract
 import android.widget.Toast
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.toMutableStateList
@@ -24,6 +26,8 @@ import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 import ai.mlc.mlcllm.OpenAIProtocol.ChatCompletionMessage
 import kotlinx.coroutines.*
+import java.io.FileInputStream
+import java.io.OutputStream
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     val modelList = emptyList<ModelState>().toMutableStateList()
@@ -40,11 +44,28 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val gson = Gson()
     private val modelIdSet = emptySet<String>().toMutableSet()
 
+    // ---- New: chat settings (persisted) ----
+    val chatSettings = ChatSettings().also { it.load(application, appDirFile) }
+
+    // ---- New: benchmark state ----
+    val benchmarkState = BenchmarkState()
+
+    // ---- New: tested model libs (only ones actually compiled into current .so) ----
+    // The current libtvm4j_runtime_packed.so was compiled with only gemma2_q4f16_1.
+    // Other modelLib entries are downloadable but chat will likely fail at engine.reload().
+    private val testedModelLibs = setOf(
+        "gemma2_q4f16_1_5cc7dbd3ae3d1040984d9720b2d7b7d4"
+    )
+
+    fun isModelLibTested(lib: String): Boolean = testedModelLibs.contains(lib)
+
     companion object {
         const val AppConfigFilename = "mlc-app-config.json"
         const val ModelConfigFilename = "mlc-chat-config.json"
         const val ParamsConfigFilename = "ndarray-cache.json"
         const val ModelUrlSuffix = "resolve/main/"
+        const val SettingsFilename = "chat-settings.json"
+        const val BenchHistoryFilename = "bench-history.json"
     }
 
     init {
@@ -165,6 +186,235 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         return false
     }
 
+    // ============================================================
+    // New: scan local appDirFile for model directories (those that
+    // contain a mlc-chat-config.json but are not yet registered).
+    // Useful for users who manually copy model files into
+    // /sdcard/Android/data/ai.mlc.mlcchat/files/<model-id>/
+    // ============================================================
+    fun scanLocalModels() {
+        val appDir = appDirFile ?: return
+        if (!appDir.exists()) {
+            issueAlert("App dir does not exist: ${appDir.absolutePath}")
+            return
+        }
+        val added = mutableListOf<String>()
+        val subDirs = appDir.listFiles { f -> f.isDirectory } ?: emptyArray()
+        for (sub in subDirs) {
+            val modelConfigFile = File(sub, ModelConfigFilename)
+            if (!modelConfigFile.exists()) continue
+            if (modelIdSet.contains(sub.name)) continue
+            try {
+                val modelConfigString = modelConfigFile.readText()
+                val modelConfig = gson.fromJson(modelConfigString, ModelConfig::class.java)
+                modelConfig.modelId = sub.name
+                if (modelConfig.modelLib.isEmpty()) {
+                    // try to infer from id - keep empty for untested libs
+                    modelConfig.modelLib = ""
+                }
+                // modelUrl: leave empty (it's a local import)
+                addModelConfig(modelConfig, "local:///${sub.name}/", false)
+                added.add(sub.name)
+            } catch (e: Exception) {
+                // ignore malformed dir
+            }
+        }
+        if (added.isEmpty()) {
+            issueAlert("No new local models found in ${appDir.absolutePath}\n\nPlace a model directory containing '$ModelConfigFilename' under that path first.")
+        } else {
+            issueAlert("Added ${added.size} local model(s):\n${added.joinToString("\n")}")
+        }
+    }
+
+    // ============================================================
+    // New: SAF (Storage Access Framework) directory import.
+    // Recursively copy all files under the chosen tree URI into
+    // appDirFile/<modelId>/ where modelId is derived from the tree
+    // display name (last path segment, sanitized).
+    // ============================================================
+    fun importFromTreeUri(treeUri: Uri) {
+        thread(start = true) {
+            try {
+                val resolver = application.contentResolver
+                var treeName: String? = null
+                val cursor = resolver.query(
+                    treeUri, arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+                    null, null, null
+                )
+                cursor?.use {
+                    if (it.moveToFirst()) treeName = it.getString(0)
+                }
+                val rawName = treeName ?: "imported-${UUID.randomUUID()}"
+                // sanitize: keep alnum, dash, underscore, dot
+                val modelId = rawName.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                    .trim('_')
+                    .ifEmpty { "imported-${UUID.randomUUID()}" }
+
+                val destDir = File(appDirFile, modelId)
+                if (destDir.exists()) {
+                    viewModelScope.launch {
+                        issueAlert("Destination dir already exists: $modelId\nWill not overwrite. Please delete it first or rename.")
+                    }
+                    return@thread
+                }
+                destDir.mkdirs()
+
+                val tree = DocumentsContract.buildDocumentUriUsingTree(
+                    treeUri,
+                    DocumentsContract.getTreeDocumentId(treeUri)
+                )
+                copyDocumentTree(resolver, tree, destDir)
+
+                viewModelScope.launch {
+                    // try to load model config
+                    val modelConfigFile = File(destDir, ModelConfigFilename)
+                    if (!modelConfigFile.exists()) {
+                        issueAlert("Imported $modelId but no $ModelConfigFilename found in it. The directory needs to be a valid MLC model dir.")
+                        return@launch
+                    }
+                    try {
+                        val modelConfigString = modelConfigFile.readText()
+                        val modelConfig = gson.fromJson(modelConfigString, ModelConfig::class.java)
+                        modelConfig.modelId = modelId
+                        // modelLib stays as defined in the json (may be untested)
+                        if (modelIdSet.contains(modelId)) {
+                            issueAlert("$modelId already exists.")
+                            return@launch
+                        }
+                        addModelConfig(modelConfig, "local:///$modelId/", false)
+                        issueAlert("Imported model: $modelId\nModelLib: ${modelConfig.modelLib}\nTested: ${if (isModelLibTested(modelConfig.modelLib)) "YES" else "NO (chat may fail)"}")
+                    } catch (e: Exception) {
+                        issueAlert("Failed to parse model config: ${e.localizedMessage}")
+                    }
+                }
+            } catch (e: Exception) {
+                viewModelScope.launch {
+                    issueAlert("SAF import failed: ${e.localizedMessage}")
+                }
+            }
+        }
+    }
+
+    private fun copyDocumentTree(resolver: android.content.ContentResolver, docUri: Uri, destDir: File) {
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+            docUri,
+            DocumentsContract.getDocumentId(docUri)
+        )
+        val cursor = resolver.query(
+            childrenUri,
+            arrayOf(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE
+            ),
+            null, null, null
+        )
+        cursor?.use { c ->
+            while (c.moveToNext()) {
+                val docId = c.getString(0)
+                val name = c.getString(1)
+                val mime = c.getString(2)
+                val childUri = DocumentsContract.buildDocumentUriUsingTree(docUri, docId)
+                if (DocumentsContract.Document.MIME_TYPE_DIR == mime) {
+                    val subDir = File(destDir, name)
+                    subDir.mkdirs()
+                    copyDocumentTree(resolver, childUri, subDir)
+                } else {
+                    val destFile = File(destDir, name)
+                    destFile.parentFile?.mkdirs()
+                    resolver.openInputStream(childUri).use { input ->
+                        FileOutputStream(destFile).use { output ->
+                            input?.copyTo(output)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ============================================================
+    // New: add a custom HF-Mirror model URL.
+    // User inputs e.g. https://hf-mirror.com/mlc-ai/SomeModel-MLC
+    // ============================================================
+    fun addCustomModelUrl(url: String) {
+        val trimmed = url.trim().trimEnd('/')
+        if (trimmed.isEmpty()) {
+            issueAlert("URL is empty")
+            return
+        }
+        if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
+            issueAlert("URL must start with http:// or https://\nFor HF-Mirror, use https://hf-mirror.com/mlc-ai/<model-name>")
+            return
+        }
+        // derive model id from URL last path segment
+        val segs = trimmed.split("/").filter { it.isNotEmpty() }
+        val modelId = segs.lastOrNull() ?: "custom-${UUID.randomUUID()}"
+        if (modelIdSet.contains(modelId)) {
+            issueAlert("Model id '$modelId' already exists.")
+            return
+        }
+        val record = ModelRecord(
+            modelUrl = "$trimmed/",
+            modelId = modelId,
+            estimatedVramBytes = null,
+            modelLib = "custom_${UUID.randomUUID()}"
+        )
+        // we don't pre-add; download config first
+        thread(start = true) {
+            try {
+                val configUrl = URL("$trimmed/${ModelUrlSuffix}${ModelConfigFilename}")
+                val tempId = UUID.randomUUID().toString()
+                val tempFile = File(
+                    application.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS),
+                    tempId
+                )
+                configUrl.openStream().use { inp ->
+                    Channels.newChannel(inp).use { src ->
+                        FileOutputStream(tempFile).use { fos ->
+                            fos.channel.transferFrom(src, 0, Long.MAX_VALUE)
+                        }
+                    }
+                }
+                require(tempFile.exists())
+                viewModelScope.launch {
+                    try {
+                        val modelConfigString = tempFile.readText()
+                        val modelConfig = gson.fromJson(modelConfigString, ModelConfig::class.java)
+                        modelConfig.modelId = modelId
+                        modelConfig.modelLib = record.modelLib
+                        modelConfig.estimatedVramBytes = record.estimatedVramBytes
+                        if (modelIdSet.contains(modelConfig.modelId)) {
+                            tempFile.delete()
+                            issueAlert("${modelConfig.modelId} already used")
+                            return@launch
+                        }
+                        // Note: do NOT call isModelConfigAllowed - the lib is custom
+                        // We bypass the check by also adding to appConfig.modelLibs via updateAppConfig
+                        val modelDirFile = File(appDirFile, modelConfig.modelId)
+                        val modelConfigFile = File(modelDirFile, ModelConfigFilename)
+                        tempFile.copyTo(modelConfigFile, overwrite = true)
+                        tempFile.delete()
+                        require(modelConfigFile.exists())
+                        // mark lib as allowed
+                        updateAppConfig {
+                            appConfig.modelLibs.add(modelConfig.modelLib)
+                            appConfig.modelList.add(record.copy(modelUrl = "$trimmed/"))
+                        }
+                        addModelConfig(modelConfig, "$trimmed/", false)
+                        issueAlert("Added custom model: $modelId\nModelLib: ${modelConfig.modelLib}\nTested: ${if (isModelLibTested(modelConfig.modelLib)) "YES" else "NO (chat may fail)"}\nSource: $trimmed")
+                    } catch (e: Exception) {
+                        viewModelScope.launch {
+                            issueAlert("Add custom model failed: ${e.localizedMessage}\n\nCheck the URL points to a valid MLC repo on HF-Mirror (e.g. https://hf-mirror.com/mlc-ai/<model-name>-MLC)")
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                viewModelScope.launch {
+                    issueAlert("Download model config failed: ${e.localizedMessage}\n\nURL was: $trimmed/${ModelUrlSuffix}${ModelConfigFilename}")
+                }
+            }
+        }
+    }
 
     private fun downloadModelConfig(
         modelUrl: String,
@@ -250,9 +500,22 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 loadParamsConfig()
                 switchToIndexing()
             } else {
-                downloadParamsConfig()
+                // For local imports with no ndarray-cache.json, go straight to Finished.
+                if (modelUrl.startsWith("local:///")) {
+                    // skip download - just go to Finished
+                    if (modelConfigFile().exists()) {
+                        switchToFinished()
+                    } else {
+                        // no params config, but local model - assume Finished
+                        switchToFinished()
+                    }
+                } else {
+                    downloadParamsConfig()
+                }
             }
         }
+
+        private fun modelConfigFile() = File(modelDirFile, ModelConfigFilename)
 
         private fun loadParamsConfig() {
             val paramsConfigFile = File(modelDirFile, ParamsConfigFilename)
@@ -351,12 +614,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 if (file.exists()) {
                     ++progress.value
                 } else {
-                    remainingTasks.add(
-                        DownloadTask(
-                            URL("${modelUrl}${ModelUrlSuffix}${tokenizerFilename}"),
-                            file
+                    if (!modelUrl.startsWith("local:///")) {
+                        remainingTasks.add(
+                            DownloadTask(
+                                URL("${modelUrl}${ModelUrlSuffix}${tokenizerFilename}"),
+                                file
+                            )
                         )
-                    )
+                    }
                 }
             }
             for (paramsRecord in paramsConfig.paramsRecords) {
@@ -364,12 +629,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 if (file.exists()) {
                     ++progress.value
                 } else {
-                    remainingTasks.add(
-                        DownloadTask(
-                            URL("${modelUrl}${ModelUrlSuffix}${paramsRecord.dataPath}"),
-                            file
+                    if (!modelUrl.startsWith("local:///")) {
+                        remainingTasks.add(
+                            DownloadTask(
+                                URL("${modelUrl}${ModelUrlSuffix}${paramsRecord.dataPath}"),
+                                file
+                            )
                         )
-                    )
+                    }
                 }
             }
             if (progress.value < total.value) {
@@ -490,6 +757,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         fun startChat() {
+            if (!isModelLibTested(modelConfig.modelLib)) {
+                issueAlert("WARNING: modelLib '${modelConfig.modelLib}' is NOT compiled into this APK's libtvm4j_runtime_packed.so.\n\nThe current build only contains the gemma2_q4f16_1 modelLib. Chat will likely crash when starting.\n\nYou can still attempt, but expect an engine.reload() failure.")
+            }
             chatState.requestReloadChat(
                 modelConfig,
                 modelDirFile.absolutePath,
@@ -580,8 +850,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         private fun interruptChat(prologue: () -> Unit, epilogue: () -> Unit) {
-            // prologue runs before interruption
-            // epilogue runs after interruption
             require(interruptable())
             if (modelChatState.value == ModelChatState.Ready) {
                 prologue()
@@ -673,8 +941,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 ))
 
                 viewModelScope.launch {
+                    val s = chatSettings
                     val responses = engine.chat.completions.create(
                         messages = historyMessages,
+                        temperature = s.temperature.value,
+                        top_p = s.topP.value,
+                        max_tokens = s.maxGenLen.value,
                         stream_options = OpenAIProtocol.StreamOptions(include_usage = true)
                     )
 
@@ -715,6 +987,86 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
 
+                    if (modelChatState.value == ModelChatState.Generating) switchToReady()
+                }
+            }
+        }
+
+        // ============================================================
+        // New: benchmark run - given a prompt, return metrics
+        // ============================================================
+        fun runBenchmark(
+            prompt: String,
+            maxTokens: Int,
+            onResult: (BenchmarkResult) -> Unit
+        ) {
+            require(chatable())
+            switchToGenerating()
+            val startWall = System.currentTimeMillis()
+            val startPromptTokens = historyMessages.size
+            appendMessage(MessageRole.User, prompt)
+            appendMessage(MessageRole.Assistant, "")
+            executorService.submit {
+                historyMessages.add(ChatCompletionMessage(
+                    role = OpenAIProtocol.ChatCompletionRole.user,
+                    content = prompt
+                ))
+                viewModelScope.launch {
+                    val s = chatSettings
+                    val tStart = System.currentTimeMillis()
+                    var firstTokenMs = -1L
+                    val responses = engine.chat.completions.create(
+                        messages = historyMessages,
+                        temperature = 0.0f,  // deterministic for benchmarks
+                        top_p = 1.0f,
+                        max_tokens = maxTokens,
+                        stream_options = OpenAIProtocol.StreamOptions(include_usage = true)
+                    )
+                    var streamingText = ""
+                    var outputTokens = 0
+                    for (res in responses) {
+                        if (!callBackend {
+                            for (choice in res.choices) {
+                                choice.delta.content?.let { content ->
+                                    if (firstTokenMs < 0 && content.asText().isNotEmpty()) {
+                                        firstTokenMs = System.currentTimeMillis() - tStart
+                                    }
+                                    streamingText += content.asText()
+                                    updateMessage(MessageRole.Assistant, streamingText)
+                                }
+                                choice.finish_reason?.let {}
+                            }
+                            res.usage?.let { u ->
+                                outputTokens = (u.completion_tokens ?: 0)
+                                report.value = u.extra?.asTextLabel() ?: ""
+                            }
+                        });
+                    }
+                    val tEnd = System.currentTimeMillis()
+                    val wallMs = tEnd - startWall
+                    val genMs = tEnd - tStart
+                    val ttftMs = if (firstTokenMs >= 0) firstTokenMs else -1
+                    val tokPerSec = if (genMs > 0 && outputTokens > 0) outputTokens * 1000.0 / genMs else 0.0
+                    if (streamingText.isNotEmpty()) {
+                        historyMessages.add(ChatCompletionMessage(
+                            role = OpenAIProtocol.ChatCompletionRole.assistant,
+                            content = streamingText
+                        ))
+                    } else {
+                        if (historyMessages.isNotEmpty()) {
+                            historyMessages.removeAt(historyMessages.size - 1)
+                        }
+                    }
+                    val result = BenchmarkResult(
+                        prompt = prompt,
+                        wallTimeMs = wallMs,
+                        ttftMs = ttftMs,
+                        generationTimeMs = genMs,
+                        outputTokens = outputTokens,
+                        tokPerSec = tokPerSec,
+                        timestamp = System.currentTimeMillis()
+                    )
+                    onResult(result)
                     if (modelChatState.value == ModelChatState.Generating) switchToReady()
                 }
             }
@@ -798,3 +1150,177 @@ data class ParamsRecord(
 data class ParamsConfig(
     @SerializedName("records") val paramsRecords: List<ParamsRecord>
 )
+
+// ============================================================
+// New: chat settings (persisted to JSON)
+// ============================================================
+data class ChatSettings(
+    val temperature: MutableFloatStateHolder = MutableFloatStateHolder(0.7f, 0.0f, 2.0f),
+    val topP: MutableFloatStateHolder = MutableFloatStateHolder(0.95f, 0.0f, 1.0f),
+    val maxGenLen: MutableIntStateHolder = MutableIntStateHolder(512, 1, 8192),
+    val meanGenLen: MutableIntStateHolder = MutableIntStateHolder(128, 1, 4096),
+    val repetitionPenalty: MutableFloatStateHolder = MutableFloatStateHolder(1.0f, 0.5f, 2.0f),
+    val presencePenalty: MutableFloatStateHolder = MutableFloatStateHolder(0.0f, -2.0f, 2.0f),
+    val frequencyPenalty: MutableFloatStateHolder = MutableFloatStateHolder(0.0f, -2.0f, 2.0f),
+    val shiftK: MutableIntStateHolder = MutableIntStateHolder(0, -1, 32),
+    val prefillChunkSize: MutableIntStateHolder = MutableIntStateHolder(2048, 128, 8192),
+    val streaming: MutableBooleanStateHolder = MutableBooleanStateHolder(true),
+    val threads: MutableIntStateHolder = MutableIntStateHolder(2, 1, 8),
+    val systemPrompt: MutableStringStateHolder = MutableStringStateHolder("You are a helpful, respectful and honest assistant."),
+    val convTemplate: MutableStringStateHolder = MutableStringStateHolder("auto")
+) {
+    fun load(application: Application, baseDir: java.io.File?) {
+        try {
+            val f = java.io.File(baseDir, "chat-settings.json")
+            if (f.exists()) {
+                val gson = com.google.gson.Gson()
+                val obj = gson.fromJson(f.readText(), com.google.gson.JsonObject::class.java)
+                fun gF(name: String, default: Float): Float = if (obj.has(name)) obj.get(name).asFloat else default
+                fun gI(name: String, default: Int): Int = if (obj.has(name)) obj.get(name).asInt else default
+                fun gB(name: String, default: Boolean): Boolean = if (obj.has(name)) obj.get(name).asBoolean else default
+                fun gS(name: String, default: String): String = if (obj.has(name)) obj.get(name).asString else default
+                temperature.set(gF("temperature", temperature.value))
+                topP.set(gF("top_p", topP.value))
+                maxGenLen.set(gI("max_gen_len", maxGenLen.value))
+                meanGenLen.set(gI("mean_gen_len", meanGenLen.value))
+                repetitionPenalty.set(gF("repetition_penalty", repetitionPenalty.value))
+                presencePenalty.set(gF("presence_penalty", presencePenalty.value))
+                frequencyPenalty.set(gF("frequency_penalty", frequencyPenalty.value))
+                shiftK.set(gI("shift_k", shiftK.value))
+                prefillChunkSize.set(gI("prefill_chunk_size", prefillChunkSize.value))
+                streaming.set(gB("streaming", streaming.value))
+                threads.set(gI("threads", threads.value))
+                systemPrompt.set(gS("system_prompt", systemPrompt.value))
+                convTemplate.set(gS("conv_template", convTemplate.value))
+            }
+        } catch (e: Exception) { /* defaults */ }
+    }
+    fun save(application: Application, baseDir: java.io.File?) {
+        try {
+            val f = java.io.File(baseDir, "chat-settings.json")
+            val gson = com.google.gson.Gson()
+            val obj = com.google.gson.JsonObject()
+            obj.addProperty("temperature", temperature.value)
+            obj.addProperty("top_p", topP.value)
+            obj.addProperty("max_gen_len", maxGenLen.value)
+            obj.addProperty("mean_gen_len", meanGenLen.value)
+            obj.addProperty("repetition_penalty", repetitionPenalty.value)
+            obj.addProperty("presence_penalty", presencePenalty.value)
+            obj.addProperty("frequency_penalty", frequencyPenalty.value)
+            obj.addProperty("shift_k", shiftK.value)
+            obj.addProperty("prefill_chunk_size", prefillChunkSize.value)
+            obj.addProperty("streaming", streaming.value)
+            obj.addProperty("threads", threads.value)
+            obj.addProperty("system_prompt", systemPrompt.value)
+            obj.addProperty("conv_template", convTemplate.value)
+            f.writeText(gson.toJson(obj))
+        } catch (e: Exception) { /* ignore */ }
+    }
+    fun summary(): String =
+        "temp=${temperature.value}\n" +
+        "top_p=${topP.value}\n" +
+        "max_tokens=${maxGenLen.value}\n" +
+        "mean_gen_len=${meanGenLen.value}\n" +
+        "rep_pen=${repetitionPenalty.value}\n" +
+        "pres_pen=${presencePenalty.value}\n" +
+        "freq_pen=${frequencyPenalty.value}\n" +
+        "shift_k=${shiftK.value}\n" +
+        "prefill=${prefillChunkSize.value}\n" +
+        "streaming=${streaming.value}\n" +
+        "threads=${threads.value}\n" +
+        "conv=$convTemplate\n" +
+        "system='${systemPrompt.value.take(40)}...'"
+}
+
+// Mutable holders for Compose-friendly state
+class MutableFloatStateHolder(initial: Float, val min: Float, val max: Float) {
+    val value = mutableStateOf(initial.coerceIn(min, max))
+    fun set(v: Float) { value.value = v.coerceIn(min, max) }
+}
+class MutableIntStateHolder(initial: Int, val min: Int, val max: Int) {
+    val value = mutableStateOf(initial.coerceIn(min, max))
+    fun set(v: Int) { value.value = v.coerceIn(min, max) }
+}
+class MutableBooleanStateHolder(initial: Boolean) {
+    val value = mutableStateOf(initial)
+    fun set(v: Boolean) { value.value = v }
+}
+class MutableStringStateHolder(initial: String) {
+    val value = mutableStateOf(initial)
+    fun set(v: String) { value.value = v }
+}
+
+// ============================================================
+// New: benchmark result + history
+// ============================================================
+data class BenchmarkResult(
+    val prompt: String,
+    val wallTimeMs: Long,
+    val ttftMs: Long,
+    val generationTimeMs: Long,
+    val outputTokens: Int,
+    val tokPerSec: Double,
+    val timestamp: Long
+) {
+    fun format(): String =
+        "wall=${wallTimeMs}ms | ttft=${ttftMs}ms | gen=${generationTimeMs}ms | out_tok=$outputTokens | tok/s=${String.format("%.2f", tokPerSec)}"
+}
+
+class BenchmarkState {
+    val history = emptyList<BenchmarkResult>().toMutableStateList()
+    val running = mutableStateOf(false)
+    val lastResult = mutableStateOf<BenchmarkResult?>(null)
+    val progressLabel = mutableStateOf("")
+
+    fun push(r: BenchmarkResult) {
+        history.add(0, r)
+        if (history.size > 50) history.removeAt(history.lastIndex)
+        lastResult.value = r
+    }
+
+    fun load(baseDir: java.io.File?) {
+        try {
+            val f = java.io.File(baseDir, "bench-history.json")
+            if (!f.exists()) return
+            val gson = com.google.gson.Gson()
+            val arr = gson.fromJson(f.readText(), com.google.gson.JsonArray::class.java)
+            for (i in 0 until arr.size()) {
+                val o = arr[i].asJsonObject
+                history.add(BenchmarkResult(
+                    prompt = o.get("prompt").asString,
+                    wallTimeMs = o.get("wall_time_ms").asLong,
+                    ttftMs = if (o.has("ttft_ms")) o.get("ttft_ms").asLong else -1L,
+                    generationTimeMs = o.get("generation_time_ms").asLong,
+                    outputTokens = o.get("output_tokens").asInt,
+                    tokPerSec = o.get("tok_per_sec").asDouble,
+                    timestamp = o.get("timestamp").asLong
+                ))
+            }
+        } catch (e: Exception) {}
+    }
+
+    fun save(baseDir: java.io.File?) {
+        try {
+            val f = java.io.File(baseDir, "bench-history.json")
+            val gson = com.google.gson.Gson()
+            val arr = com.google.gson.JsonArray()
+            for (r in history) {
+                val o = com.google.gson.JsonObject()
+                o.addProperty("prompt", r.prompt)
+                o.addProperty("wall_time_ms", r.wallTimeMs)
+                o.addProperty("ttft_ms", r.ttftMs)
+                o.addProperty("generation_time_ms", r.generationTimeMs)
+                o.addProperty("output_tokens", r.outputTokens)
+                o.addProperty("tok_per_sec", r.tokPerSec)
+                o.addProperty("timestamp", r.timestamp)
+                arr.add(o)
+            }
+            f.writeText(gson.toJson(arr))
+        } catch (e: Exception) {}
+    }
+
+    fun clear() {
+        history.clear()
+        lastResult.value = null
+    }
+}
